@@ -1,2 +1,2 @@
 # FTIR-export
-Program for check and interpretation results of IR-spectroscopy
+ is a product of my laziness and work responsibilities that cannot be ignored.
