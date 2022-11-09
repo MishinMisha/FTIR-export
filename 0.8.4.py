@@ -1,0 +1,538 @@
+from typing import Any
+import os
+import datetime
+import time
+from termcolor import colored
+import ctypes
+import configparser
+import requests
+import json
+from requests.auth import HTTPBasicAuth
+import re
+
+
+kernel32 = ctypes.windll.kernel32
+kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
+
+cfg = configparser.ConfigParser()
+
+if os.path.exists('cfg.ini'):
+    cfg.read('cfg.ini')
+
+else:
+    creation_cfg = open('cfg.ini', 'w')
+    creation_cfg.write('[PATHS]' + '\n' + '\n' +
+                       '; Путь к директории содержащей файлы *.ftir, *.spc, *.csv' + '\n' +
+                       'src_files = C:\\Nicolet 380 spectrums\\' + '\n' + '\n' +
+                       '; Путь к директории для хранения результатов спектрометрии' + '\n' +
+                       'dst_files = C:\\Nicolet 380 spectrums\\' + '\n' + '\n' +
+                       '; Путь для экспорта *.spc' + '\n' +
+                       'spc_res_exp = \\\\192.168.0.198\\Export Lab\\FTIR-specrtums\\3.1. Thermo_Nicolet_380_EKT' +
+                       '\n' + '\n' +
+                       '; Путь для экспорта *.ftir' + '\n' +
+                       'ftir_res_exp = I:\\FTIR Thermo Nicolet 380' + '\n' + '\n' +
+                       '; Путь для экспорта *.csv' + '\n' +
+                       'din_res_exp = \\\\192.168.0.198\\Export Lab\\FTIR_csv\\Income' + '\n' + '\n' +
+                       '; Путь к базе референсов для расчетов по DIN 51453' + '\n' +
+                       'reference_base_path = \\\\192.168.0.198\\Export Lab\\FTIR_fresh')
+    creation_cfg.close()
+
+cfg.read('cfg.ini')
+
+src = cfg['PATHS']['src_files']
+dst = cfg['PATHS']['dst_files']
+spc_res_exp = cfg['PATHS']['spc_res_exp']
+ftir_res_exp = cfg['PATHS']['ftir_res_exp']
+din_res_exp = cfg['PATHS']['din_res_exp']
+reference_base_path = cfg['PATHS']['reference_base_path']
+
+current_dt = datetime.date.today()  # помещает в переменную текщую дату в формате ISO
+format_dt = datetime.date.strftime(current_dt, '%d.%m.%y')  # приводит текущую дату к желаемому виду
+dd = current_dt.day  # день в числовой нотации
+mm = current_dt.month  # месяц в числовой нотации  
+yyyy = current_dt.year  # год в числовой нотации
+
+
+def mon_name(ru):  # заменяет числовую нотацию русским названием месяца
+    if (ru >= 1) & (ru <= 12):
+        return ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь', 'июль', 'август', 'сентябрь', 'октябрь',
+                'ноябрь', 'декабрь'][ru - 1]
+    else:
+        return 'Такого месяца не бывает!'
+
+
+mon_ru = mon_name(mm)  # помещает в переменную русское название текущего месяца
+res_path = f'{dst}\\{yyyy}\\{mon_ru}\\{format_dt}'  # записывает в переменную путь для текущей даты
+
+if os.path.exists(res_path):  # Проверяет наличие необходимых каталогов
+    print('*' * 100 + '\n' + 'Eine Verzeichnisstruktur zum Speichern von '
+                             'Spektrometrieergebnissen ist bereits vorhanden.' + '\n')
+    time.sleep(1)
+
+else:  # Создает директории для хранения результатов
+    os.makedirs(f'{res_path}\\ftir')
+    os.makedirs(f'{res_path}\\spc')
+    os.makedirs(f'{res_path}\\csv')
+    print('*' * 100 + '\n' + 'Eine Katalogstruktur zum Speichern von Spektrometrieergebnissen wurde erstellt.')
+    time.sleep(1)
+
+result_directory = src  # Путь к файлам с результатами
+result_files = os.listdir(result_directory)  # список имен файлов ftir
+ftir_files_path = []  # создает пустой список для последующего хранения абсолютных путей к файлам фтир
+bad_ftir_files_path = []  # создает список для хранения путей к плохим файлам фтир
+
+for file in result_files:  # прикручивает путь к имени файла фтир, а затем добавляет его в список
+    if ".ftir" in file:
+        ftir_files_path.append(f'{result_directory}{file}')
+
+bad_ftir_files_path = []
+
+
+
+
+
+def hm_request(csv_path):  # Возвращает название масла и контрагента
+    print(csv_path[-10:-4])
+    get_json_req = requests.get(f'http://192.168.0.29/search.json?q={csv_path[-10:-4]}')
+    j_data = json.loads(get_json_req.text)
+
+    sample_data = []  # id пробы, номер пробы, контрагент
+
+    try:
+        for item in j_data['results']:  # отбор нужных значений из полученных данных json
+            sample_data.extend([item['id'], item['number'], item['customer_name'], item['comments']])
+    except KeyError:
+        for item in j_data['results']:  # пробел вместо контрагента, если в данных json его нет
+            sample_data.extend([item['id'], item['number'], ' ', item['comments']])
+
+    try:
+        get_sample_site = requests.get(f'http://192.168.0.29/samples/{sample_data[0]}/',
+                                       auth=HTTPBasicAuth('mmu@oiltest.ru',
+                                                          '27733013mmu'))
+    except IndexError:
+        print('Номер образца отсутствует в Head Miner')
+        pass
+
+    http_response = re.sub("  ", '', get_sample_site.text)  # код страницы образца без лишних пробелов
+    http_response_lst = http_response.split(sep='\n')
+    if len(sample_data) == 4:
+        comments = sample_data[3]
+    else:
+        comments = None
+
+    #print(http_response)
+
+    if "DIN 51453" in http_response:
+        try:
+            lst_index_cagent = http_response_lst.index('Контрагент')
+            cagent_data = re.sub("['[&quot;]|\'|\-|_|«|»|(|)|,]", "", http_response_lst[lst_index_cagent + 3]).split(
+                ' ')
+        except ValueError:
+            print('В исходных данных отсутствует название контрагента!')
+            cagent_data = input('Введите название контрагента:' + '\n').split(' ')
+
+        try:
+            lst_index_oilname = http_response_lst.index('Название')
+            oil_data = re.sub("['\'|\-|_|«|»|(|)|,]", " ", http_response_lst[lst_index_oilname + 3]).split(' ')
+        except ValueError:
+            oil_data = []
+            if comments is None:
+                print('В исходных данных отсутствует название масла!')
+                oil_data = input('Введите название масла:' + '\n').split(' ')
+            else:
+                for element in comments.split(' '):
+                    if "\r" not in element:
+                        oil_data.append(element)
+        print(f'Масло: {oil_data}' + '\n' + f'Контрагент: {cagent_data}' + '\n')
+        return oil_data, cagent_data
+    else:
+        return None, None
+
+
+def search_reference_oil(oil, cagent):
+    all_reference_lst = []
+    matched_reference_lst = []
+    for rootdir, dirs, files in os.walk(reference_base_path):  # заполнение списка путями к референсам
+        for file in files:
+            path_to_reference = os.path.join(rootdir, file)
+            all_reference_lst.append(path_to_reference)
+    for ref_path in all_reference_lst:
+        index_oil = []
+        for part in oil:
+            if re.search(fr"\\.*{part}.*\.csv", ref_path, re.IGNORECASE) is not None:
+                index_oil.extend('x')
+        if len(index_oil) >= len(oil):
+            if " ".join(cagent) in ref_path:
+                matched_reference_lst.append(ref_path)
+            else:
+                for part in oil:
+                    if re.search(fr"\\.*{part}.*\.csv", ref_path, re.IGNORECASE) is not None:
+                        index_oil.extend('x')
+                if len(index_oil) >= len(oil) and 'МИЦ ГСМ' in ref_path:
+                    matched_reference_lst.append(ref_path)
+
+    if not matched_reference_lst:
+        print('\nРеференс не найден!\n')
+        print(hm_request())
+        print('\nВыберете подходящий референс из списка:')
+        i = 0
+        for element in all_reference_lst:
+            i = i + 1
+            print(f'{i}. {element}')
+        reference_oil = all_reference_lst[int((input('Введите номер референса:'))) - 1]
+        print(f'\nРеференс выбран:\n{reference_oil}\n\n')
+    else:
+        if len(matched_reference_lst) >> 1:
+            print('\nВыберете подходящий референс из списка:')
+            i = 0
+            for element in matched_reference_lst:
+                i = i + 1
+                print(f'{i}. {element}')
+            reference_oil = matched_reference_lst[int((input('Введите номер референса:'))) - 1]
+            print(f'\nРеференс выбран:\n{reference_oil}\n\n')
+        else:
+            reference_oil = matched_reference_lst[0]
+            print(f'\nРеференс найден:\n{reference_oil}\n\n')
+    return reference_oil
+
+
+def convert_csv(path):
+    csv_x = []
+    csv_y = []
+    file_csv = open(path)
+    if 'XLabel' not in file_csv.readline():  # Прреобразует Екатеринбургский csv в списки с кординатами x и y (float)
+        for line in file_csv:
+            result_x = re.search('.*;', line)
+            result_y = re.search(';.*', line)
+            csv_x.append(float(re.sub(';', '', result_x.group(0))))
+            csv_y.append(float(re.sub(';', '', result_y.group(0))))
+        del csv_x[:77]
+        del csv_y[:77]
+    else:  # Прреобразует Московский csv в списки с кординатами x и y (float)
+        for line in file_csv:
+            if 'a' not in line:
+                result_x = re.search('.*,', line)
+                result_y = re.search(',.*', line)
+                csv_x.append(float(re.sub(',', '', result_x.group(0))))
+                csv_y.append(float(re.sub(',', '', result_y.group(0))))
+    return csv_x, csv_y
+
+
+def ox_ntr(x, y):
+
+    a = x[16:737]
+    b_count = (y[16] - y[737]) / len(a)
+    b = [y[16]]
+
+    for point in range(len(a)):
+        b.append(b[-1] - b_count)
+    del b[-1]
+
+    #c = x[602], x[602]  # координаты X высоты пика окисления
+    #d = y[602], b[508]  # координаты Y высоты пика окисления
+
+    ox_peak_height = str(y[602] - b[508])[:5]
+    if float(ox_peak_height) < 0:
+        ox_peak_height = 0.0
+
+    #plt.plot(x[16:814], y[16:814])  # фрагмент кривой для построение высоты пика окисления
+    #plt.plot(c, d, color='red')  # Высота окисления
+    #plt.plot(a, b, color='gray')  # Базовая линия
+    #plt.show()
+
+    # Расчет высоты пика нитрования
+    e = x[553:568]
+    f_count = (y[553] - y[567]) / (len(e))
+    f = [y[553]]
+
+    for point in range(len(e)):
+        f.append(f[-1] - f_count)
+    del f[-1]
+
+    #h = x[560], x[560]
+    #g = y[560], f[7]
+
+    ntr_peak_height = str(y[561] - f[0])[:5]
+    if float(ntr_peak_height) < 0:
+        ntr_peak_height = 0.0
+
+    #plt.plot(x[500:600], y[500:600])  # фрагмент кривой для построение высоты пика нитрования
+    #plt.plot(h, g, color='red')  # Высота Нитрования
+    #plt.plot(e, f, color='gray')  # Базовая линия
+    #plt.show()
+
+    return ox_peak_height, ntr_peak_height
+
+
+def dincalc(roxi, rnitr, soxi, snitr):
+    oxid = round((float(soxi) / 1.63 - float(roxi) / 1.5) * 100)
+    if oxid < 0:
+        oxid = 0
+    nitr = round((float(snitr) / 1.63 - float(rnitr) / 1.5) * 100)
+    if nitr < 0:
+        nitr = 0
+    #print(f'Окисление: {oxid}    Нитрование: {nitr}   Сульфатация: {slf}')
+    return [oxid, nitr]
+
+
+def slfcalc(x, y):
+    # Раcчет сульфатации
+    # Выделение фрагмента кривой для определения сульфатации
+    # slf_x = x[0:856]
+    # slf_y = y[0:856]
+
+    # Определение координат базовой линии
+    slf_bsl_lnp_x = x[(y.index(min(y[0:54]))):(y.index(min(y[700:856])))]
+    slf_bsl_lnp_count = (y[x.index(slf_bsl_lnp_x[0])] - y[x.index(slf_bsl_lnp_x[-1])]) / len(slf_bsl_lnp_x)
+    slf_bsl_lnp_y = [y[x.index(slf_bsl_lnp_x[0])]]
+
+    # Рассчет всех точек базовой линии
+    for point in range(len(slf_bsl_lnp_x)):
+        slf_bsl_lnp_y.append(slf_bsl_lnp_y[-1] - slf_bsl_lnp_count)
+    del slf_bsl_lnp_y[-1]
+
+    # Диапазон для поиска точек основания и вершины пика сульфатации
+    min_slf_range = 296
+    max_slf_range = 327
+
+    # Определение пика сульфатации
+    slf_pck_y = max(y[min_slf_range:max_slf_range])
+    slf_pck_x = x[y.index(slf_pck_y)]
+
+    # Определение диапазона кординат для построения кривой сульфатации
+    # Нахождение самых низких точек
+    # slf_area_index = [y.index(min(y[min_slf_range:y.index(slf_pck_y)])),
+    #                  y.index(min(y[y.index(slf_pck_y):max_slf_range])) + 1]
+    slf_area_x = x[min_slf_range:max_slf_range]
+    slf_area_y = y[min_slf_range:max_slf_range]
+
+    # Рассчет всех точек основания пика
+    slf_base_y = slf_bsl_lnp_y[slf_bsl_lnp_x.index(slf_area_x[0]):slf_bsl_lnp_x.index(slf_area_x[-1]) + 1]
+
+    # Расчет площади сегментов как тропеций
+    segment_basement = []
+    segment_areas = []
+
+    # Нахождение высот всех сегментов фигуры
+    for number in range(len(slf_area_x)):
+        segment_basement.append(slf_area_y[number] - slf_base_y[number])
+
+    for number in range(len(segment_basement) - 1):
+        segment_areas.append(((slf_area_x[number + 1] - slf_area_x[number]) / 2)
+                             * (segment_basement[number] + segment_basement[number + 1]))
+
+    # Расчет площади сегментов как трапеций
+    for area in range(len(segment_basement) - 1):
+        segment_areas.append(float((slf_base_y[area + 1] - slf_base_y[area])))
+
+    slf = round((sum(segment_areas) + len(segment_areas) * 0.0001) * 0.5501 + 4.3015)
+    return slf
+
+
+def writefile(oxi, ntr, slf):
+    with open(ftir_files_path[-1], mode='a') as ftir_file:
+        if oxi is not None:
+            ftir_file.write(f'\n\nOxidation_DIN_51453\t{oxi}.0\n')
+        else:
+            pass
+        if ntr is not None:
+            ftir_file.write(f'Nitration_DIN_51453\t{ntr}.0\n')
+        else:
+            pass
+        ftir_file.write(f'Sulfatation\t{slf}.0\n')
+
+
+def din(csv_path):
+    oil, cagent = hm_request(csv_path)
+    if oil or cagent is not None:
+        ref_x, ref_y = (convert_csv(search_reference_oil(oil, cagent)))
+        smpl_x, smpl_y = (convert_csv(csv_path))
+
+        roxi, rnitr = ox_ntr(ref_x, ref_y)
+        soxi, snitr = ox_ntr(smpl_x, smpl_y)
+
+        dres = (dincalc(roxi, rnitr, soxi, snitr))
+        return dres
+    else:
+        return None, None
+
+
+
+def check_sort_copy():
+    csv_files_path = f'{ftir_files_path[-1][:-4]}' + 'csv'
+    spc_files_path = f'{ftir_files_path[-1][:-4]}' + 'spc'
+    dinres = din(csv_files_path)
+    x, y = (convert_csv(csv_files_path))
+    writefile(dinres[0], dinres[1], slfcalc(x, y))
+    content = open(ftir_files_path[-1])  # помещает в переменную содержимое последнего файла ftir из списка path_to_file
+    characteristic = []
+
+    for string in content.readlines():
+        characteristic.append(string)
+
+    soot = float((characteristic[1][5]) + (characteristic[1][6]) + (characteristic[1][7]))
+    water = float((characteristic[4][6]) + (characteristic[4][7]) + (characteristic[4][8]))
+    oxydation = float((characteristic[2][10]) + (characteristic[2][11]))
+    nitration = float((characteristic[3][10]) + (characteristic[3][11]))
+    is_min_a = float((characteristic[5][9]))
+    is_not_overexposure = float((characteristic[6][20]))
+
+    if soot < 1:
+        soo = True
+    else:
+        soo = False
+
+    if 5 <= oxydation <= 25:
+        oxy = True
+    else:
+        oxy = False
+
+    if 3 <= nitration <= 15 and oxydation > nitration != oxydation:
+        nit = True
+    else:
+        nit = False
+
+    if water < 0.2:
+        wat = True
+    else:
+        wat = False
+
+    if is_min_a == 1:
+        is_m = True
+    else:
+        is_m = False
+
+    if is_not_overexposure == 1:
+        is_n = True
+    else:
+        is_n = False
+
+    content.close()
+
+    if soo and wat and nit and oxy and is_m and is_n is True:
+        print(colored('*' * 100 + '\n' + 'Perfekt!' + '\n' + '*' * 100, 'green'))
+        text = open(ftir_files_path[-1])
+        for line in text:
+            print(line)
+        text.close()
+
+        os.system(f'copy \"{spc_files_path}\" \"{spc_res_exp}\"')
+        os.system(f'copy \"{csv_files_path}\" \"{din_res_exp}\"')
+        os.system(f'copy \"{ftir_files_path[-1]}\" \"{ftir_res_exp}"')
+        os.system(f'move \"{ftir_files_path[-1]}\" \"{res_path}\\ftir\"')
+        os.system(f'move \"{csv_files_path}\" \"{res_path}\\csv"')
+        os.system(f'move \"{spc_files_path}\" \"{res_path}\\spc"')
+
+        ftir_files_path.pop(-1)
+        os.system('timeout 1')
+    else:
+        bad_ftir_files_path.insert(0, ftir_files_path[-1])
+        ftir_files_path.pop(-1)
+
+
+def bad_check_copy_delete():
+    csv_files_path = f'{bad_ftir_files_path[-1][:-4]}' + 'csv'
+    spc_files_path = f'{bad_ftir_files_path[-1][:-4]}' + 'spc'
+    content = open(bad_ftir_files_path[-1])  # помещает в переменную содержимое последнего в списке path_to_file
+    characteristic = []
+
+    for string in content.readlines():
+        characteristic.append(string)
+
+    soot = float((characteristic[1][5]) + (characteristic[1][6]) + (characteristic[1][7]))
+    water = float((characteristic[4][6]) + (characteristic[4][7]) + (characteristic[4][8]))
+    oxydation = float((characteristic[2][10]) + (characteristic[2][11]))
+    nitration = float((characteristic[3][10]) + (characteristic[3][11]))
+    is_min_a = float((characteristic[5][9]))
+    is_not_overexposure = float((characteristic[6][20]))
+
+    print('*' * 100 + '\n'.strip())
+    print(characteristic[0])
+
+    if soot < 1:
+        print(characteristic[1].strip())
+    elif 1 <= soot < 3:
+        print(colored(f'{characteristic[1].strip()}', 'yellow'))
+    elif soot >= 3 or instance(soot, str):
+        print(colored(f'{characteristic[1].strip()}', 'red'))
+
+    if 5 <= oxydation <= 25:
+        print(characteristic[2].strip())
+    else:
+        print(colored(f'{characteristic[2].strip()}', 'red'))
+
+    if 3 <= nitration <= 15 and oxydation > nitration != oxydation:
+        print(characteristic[3].strip())
+    else:
+        print(colored(f'{characteristic[3].strip()}', 'red'))
+
+    if water < 0.2:
+        print(characteristic[4].strip())
+    elif 0.2 <= water < 0.5:
+        print(colored(f'{characteristic[4].strip()}', 'yellow'))
+    elif water >= 0.5:
+        print(colored(f'{characteristic[4].strip()}', 'red'))
+
+    if is_min_a == 1:
+        print(characteristic[5].strip())
+    else:
+        print(colored(f'{characteristic[5].strip()}', 'red'))
+
+    if is_not_overexposure == 1:
+        print(characteristic[6].strip())
+    else:
+        print(colored(f'{characteristic[6].strip()}', 'red'))
+
+    print(characteristic[7].strip())
+
+    try:
+        print('\n\n' + characteristic[9].strip() + '\n' + characteristic[10].strip() + '\n' + characteristic[11].strip())
+    except IndexError:
+        pass
+
+    content.close()
+
+    first_question = input('*' * 100 + '\n' + 'Ergebnis exportieren? (j/n)?')
+
+    if 'j' in first_question:
+
+        os.system(f'copy \"{spc_files_path}\" \"{spc_res_exp}\"')
+        os.system(f'copy \"{csv_files_path}\" \"{din_res_exp}\"')
+        os.system(f'copy \"{bad_ftir_files_path[-1]}\" \"{ftir_res_exp}"')
+        os.system(f'move \"{bad_ftir_files_path[-1]}\" \"{res_path}\\ftir\"')
+        os.system(f'move \"{csv_files_path}\" \"{res_path}\\csv"')
+        os.system(f'move \"{spc_files_path}\" \"{res_path}\\spc"')
+
+        bad_ftir_files_path.pop(-1)
+
+    if 'n' in first_question:
+        second_question = input('*' * 100 + '\n' + 'Ergebnis löschen (j/n)?')
+
+        if 'j' in second_question:
+            remove_files_path = bad_ftir_files_path[-1][:-4] + '*'
+            os.system(f'del \"{remove_files_path}\"')
+            bad_ftir_files_path.pop(-1)
+            print('*' * 100 + '\n' + 'Datei gelöscht.')
+
+        else:
+            bad_ftir_files_path.pop(-1)
+
+
+while len(ftir_files_path) != 0:
+    check_sort_copy()
+
+if len(ftir_files_path) == 0:
+    while len(bad_ftir_files_path) != 0:
+        bad_check_copy_delete()
+
+
+def exit():
+    quit = input('Drücken Sie \"a\", um das Programm zu beenden.' + '\n')
+    if 'a' in quit:
+        print('Auf Wiedersehen!')
+        os.system('timeout 3')
+    else:
+        exit()
+
+
+exit()
