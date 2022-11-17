@@ -107,8 +107,8 @@ def hm_request(csv_path):  # Возвращает название масла и
 
     try:
         get_sample_site = requests.get(f'http://192.168.0.29/samples/{sample_data[0]}/',
-                                       auth=HTTPBasicAuth('mmu@oiltest.ru',
-                                                          '27733013mmu'))
+                                       auth=HTTPBasicAuth('*****@*****.**,
+                                                          '******"""""""'))
     except IndexError:
         print('Номер образца отсутствует в Head Miner')
         pass
